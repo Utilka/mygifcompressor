@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageSequence
+from PIL import Image, ImageChops, ImageSequence
 
 BYTES_IN_MEGABYTE = 1_048_576
 
@@ -33,6 +33,7 @@ def compress_gif(
     target_size: int = BYTES_IN_MEGABYTE,
     color_steps: tuple[int, ...] = (256, 192, 128, 96, 64, 48, 32, 24, 16),
     frame_step_options: tuple[int, ...] = (1, 2, 3, 4),
+    transparency_optimization_options: tuple[bool, ...] = (False, True),
 ) -> CompressionResult:
     """Compress a GIF by reducing palette colors while preserving dimensions.
 
@@ -42,6 +43,9 @@ def compress_gif(
 
     It returns as soon as the target size is achieved, otherwise it keeps the smallest
     candidate it could produce.
+
+    The compressor can additionally optimize transparency by converting unchanged pixels
+    between adjacent frames to fully transparent pixels.
     """
 
     if target_size <= 0:
@@ -88,44 +92,52 @@ def compress_gif(
             if not sampled_frames:
                 continue
 
-            for colors in color_steps:
-                processed_frames = [
-                    frame.quantize(colors=colors, method=Image.Quantize.FASTOCTREE)
-                    for frame in sampled_frames
-                ]
+            for transparency_optimization in transparency_optimization_options:
+                if transparency_optimization:
+                    processed_source_frames = _make_delta_transparency_frames(sampled_frames)
+                    disposal_for_attempt: int | list[int] = 1
+                else:
+                    processed_source_frames = sampled_frames
+                    disposal_for_attempt = disposal
 
-                first, *rest = processed_frames
-                first.save(
-                    output_path,
-                    save_all=True,
-                    append_images=rest,
-                    optimize=True,
-                    loop=loop,
-                    duration=sampled_durations,
-                    disposal=disposal,
-                )
+                for colors in color_steps:
+                    processed_frames = [
+                        frame.quantize(colors=colors, method=Image.Quantize.FASTOCTREE)
+                        for frame in processed_source_frames
+                    ]
 
-                with Image.open(output_path) as candidate:
-                    if candidate.size != size:
-                        raise CompressionError(
-                            "Compression changed GIF dimensions, which is not allowed."
-                        )
-
-                compressed_size = output_path.stat().st_size
-                if compressed_size < best_size:
-                    best_size = compressed_size
-                    best_colors = colors
-
-                if compressed_size <= target_size:
-                    return CompressionResult(
-                        input_path=input_path,
-                        output_path=output_path,
-                        original_size=original_size,
-                        compressed_size=compressed_size,
-                        target_size=target_size,
-                        success=True,
-                        colors_used=colors,
+                    first, *rest = processed_frames
+                    first.save(
+                        output_path,
+                        save_all=True,
+                        append_images=rest,
+                        optimize=True,
+                        loop=loop,
+                        duration=sampled_durations,
+                        disposal=disposal_for_attempt,
                     )
+
+                    with Image.open(output_path) as candidate:
+                        if candidate.size != size:
+                            raise CompressionError(
+                                "Compression changed GIF dimensions, which is not allowed."
+                            )
+
+                    compressed_size = output_path.stat().st_size
+                    if compressed_size < best_size:
+                        best_size = compressed_size
+                        best_colors = colors
+
+                    if compressed_size <= target_size:
+                        return CompressionResult(
+                            input_path=input_path,
+                            output_path=output_path,
+                            original_size=original_size,
+                            compressed_size=compressed_size,
+                            target_size=target_size,
+                            success=True,
+                            colors_used=colors,
+                        )
 
     final_size = output_path.stat().st_size if output_path.exists() else original_size
     return CompressionResult(
@@ -137,3 +149,25 @@ def compress_gif(
         success=final_size <= target_size,
         colors_used=best_colors,
     )
+
+
+def _make_delta_transparency_frames(frames: list[Image.Image]) -> list[Image.Image]:
+    """Convert unchanged pixels between adjacent frames to transparent pixels."""
+
+    if not frames:
+        return []
+
+    optimized_frames = [frames[0].copy()]
+
+    for index in range(1, len(frames)):
+        previous = frames[index - 1]
+        current = frames[index].copy()
+
+        difference_mask = ImageChops.difference(previous, current).convert("L")
+        unchanged_mask = difference_mask.point(lambda value: 255 if value == 0 else 0)
+        transparent_fill = Image.new("RGBA", current.size, (0, 0, 0, 0))
+        current.paste(transparent_fill, mask=unchanged_mask)
+
+        optimized_frames.append(current)
+
+    return optimized_frames
