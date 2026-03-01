@@ -55,3 +55,24 @@ def test_compress_gif_can_reduce_frame_count_for_stronger_compression(tmp_path: 
         assert compressed.n_frames <= original.n_frames
 
     assert result.compressed_size <= result.original_size
+
+
+def test_compress_gif_merges_near_duplicate_frames(tmp_path: Path) -> None:
+    input_path = tmp_path / "nearly-static.gif"
+    output_path = tmp_path / "compressed.gif"
+
+    frames = []
+    for index in range(12):
+        color = (20, 40, 60) if index % 3 else (21, 41, 61)
+        frames.append(Image.new("RGB", (180, 120), color=color))
+
+    first, *rest = frames
+    first.save(input_path, save_all=True, append_images=rest, duration=60, loop=0)
+
+    result = compress_gif(input_path, output_path, target_size=1)
+
+    with Image.open(input_path) as original, Image.open(output_path) as compressed:
+        assert compressed.size == original.size
+        assert compressed.n_frames < original.n_frames
+
+    assert result.compressed_size <= result.original_size

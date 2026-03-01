@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from math import sqrt
 
-from PIL import Image, ImageSequence
+from PIL import Image, ImageChops, ImageSequence
 
 BYTES_IN_MEGABYTE = 1_048_576
 
@@ -32,13 +33,15 @@ def compress_gif(
     output_path: Path,
     target_size: int = BYTES_IN_MEGABYTE,
     color_steps: tuple[int, ...] = (256, 192, 128, 96, 64, 48, 32, 24, 16),
-    frame_step_options: tuple[int, ...] = (1, 2, 3, 4),
+    frame_step_options: tuple[int, ...] = (1, 2, 3, 4, 5, 6),
+    similarity_thresholds: tuple[float, ...] = (0.0, 2.0, 4.0),
 ) -> CompressionResult:
     """Compress a GIF by reducing palette colors while preserving dimensions.
 
     The compressor keeps width and height intact and iteratively tries combinations of:
     - lower palette color counts
     - frame downsampling (while preserving overall animation duration)
+    - near-duplicate frame merging based on visual similarity
 
     It returns as soon as the target size is achieved, otherwise it keeps the smallest
     candidate it could produce.
@@ -77,55 +80,62 @@ def compress_gif(
             raise CompressionError(f"GIF has no frames: {input_path}")
 
         for frame_step in frame_step_options:
-            sampled_frames: list[Image.Image] = []
-            sampled_durations: list[int] = []
+            step_frames: list[Image.Image] = []
+            step_durations: list[int] = []
 
             for index in range(0, len(rgba_frames), frame_step):
-                sampled_frames.append(rgba_frames[index])
+                step_frames.append(rgba_frames[index])
                 end_index = min(index + frame_step, len(durations))
-                sampled_durations.append(sum(durations[index:end_index]))
+                step_durations.append(sum(durations[index:end_index]))
 
-            if not sampled_frames:
+            if not step_frames:
                 continue
 
-            for colors in color_steps:
-                processed_frames = [
-                    frame.quantize(colors=colors, method=Image.Quantize.FASTOCTREE)
-                    for frame in sampled_frames
-                ]
-
-                first, *rest = processed_frames
-                first.save(
-                    output_path,
-                    save_all=True,
-                    append_images=rest,
-                    optimize=True,
-                    loop=loop,
-                    duration=sampled_durations,
-                    disposal=disposal,
+            for similarity_threshold in similarity_thresholds:
+                sampled_frames, sampled_durations = _merge_similar_frames(
+                    step_frames,
+                    step_durations,
+                    similarity_threshold,
                 )
 
-                with Image.open(output_path) as candidate:
-                    if candidate.size != size:
-                        raise CompressionError(
-                            "Compression changed GIF dimensions, which is not allowed."
-                        )
+                for colors in color_steps:
+                    processed_frames = [
+                        frame.quantize(colors=colors, method=Image.Quantize.FASTOCTREE)
+                        for frame in sampled_frames
+                    ]
 
-                compressed_size = output_path.stat().st_size
-                if compressed_size < best_size:
-                    best_size = compressed_size
-                    best_colors = colors
-
-                if compressed_size <= target_size:
-                    return CompressionResult(
-                        input_path=input_path,
-                        output_path=output_path,
-                        original_size=original_size,
-                        compressed_size=compressed_size,
-                        target_size=target_size,
-                        success=True,
-                        colors_used=colors,
+                    first, *rest = processed_frames
+                    first.save(
+                        output_path,
+                        save_all=True,
+                        append_images=rest,
+                        optimize=True,
+                        loop=loop,
+                        duration=sampled_durations,
+                        disposal=disposal,
                     )
+
+                    with Image.open(output_path) as candidate:
+                        if candidate.size != size:
+                            raise CompressionError(
+                                "Compression changed GIF dimensions, which is not allowed."
+                            )
+
+                    compressed_size = output_path.stat().st_size
+                    if compressed_size < best_size:
+                        best_size = compressed_size
+                        best_colors = colors
+
+                    if compressed_size <= target_size:
+                        return CompressionResult(
+                            input_path=input_path,
+                            output_path=output_path,
+                            original_size=original_size,
+                            compressed_size=compressed_size,
+                            target_size=target_size,
+                            success=True,
+                            colors_used=colors,
+                        )
 
     final_size = output_path.stat().st_size if output_path.exists() else original_size
     return CompressionResult(
@@ -137,3 +147,36 @@ def compress_gif(
         success=final_size <= target_size,
         colors_used=best_colors,
     )
+
+
+def _merge_similar_frames(
+    frames: list[Image.Image],
+    durations: list[int],
+    similarity_threshold: float,
+) -> tuple[list[Image.Image], list[int]]:
+    """Merge neighboring frames that are visually similar and add their durations."""
+
+    if not frames:
+        return [], []
+
+    merged_frames = [frames[0]]
+    merged_durations = [durations[0]]
+
+    for frame, duration in zip(frames[1:], durations[1:]):
+        if _frame_difference_rms(merged_frames[-1], frame) <= similarity_threshold:
+            merged_durations[-1] += duration
+            continue
+
+        merged_frames.append(frame)
+        merged_durations.append(duration)
+
+    return merged_frames, merged_durations
+
+
+def _frame_difference_rms(left: Image.Image, right: Image.Image) -> float:
+    """Calculate RMS difference for two RGBA frames."""
+
+    histogram = ImageChops.difference(left, right).histogram()
+    squares = sum(count * (value**2) for value, count in enumerate(histogram))
+    pixels = left.size[0] * left.size[1] * 4
+    return sqrt(squares / pixels)
