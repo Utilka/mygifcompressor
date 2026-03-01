@@ -6,6 +6,7 @@ A small production-ready Python CLI for compressing GIF files to under **1MB** w
 
 - Preserves original GIF width and height.
 - Iteratively reduces color palette depth to decrease file size.
+- Supports transparent delta-frame optimization for more aggressive animation compression.
 - Uses `input/` and `output/` directories by default.
 - Managed with Poetry.
 

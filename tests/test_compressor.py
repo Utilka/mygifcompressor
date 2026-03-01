@@ -55,3 +55,39 @@ def test_compress_gif_can_reduce_frame_count_for_stronger_compression(tmp_path: 
         assert compressed.n_frames <= original.n_frames
 
     assert result.compressed_size <= result.original_size
+
+
+def test_transparency_optimization_can_improve_size(tmp_path: Path) -> None:
+    input_path = tmp_path / "mostly_static.gif"
+    without_transparency_path = tmp_path / "without_transparency.gif"
+    with_transparency_path = tmp_path / "with_transparency.gif"
+
+    frames = []
+    for index in range(15):
+        frame = Image.new("RGBA", (240, 160), color=(15, 15, 15, 255))
+        for x in range(20):
+            for y in range(20):
+                frame.putpixel((20 + index + x, 30 + y), (240, 20, 20, 255))
+        frames.append(frame)
+
+    first, *rest = frames
+    first.save(input_path, save_all=True, append_images=rest, duration=70, loop=0)
+
+    no_transparency_result = compress_gif(
+        input_path,
+        without_transparency_path,
+        target_size=10,
+        frame_step_options=(1,),
+        color_steps=(64, 32),
+        transparency_optimization_options=(False,),
+    )
+    transparency_result = compress_gif(
+        input_path,
+        with_transparency_path,
+        target_size=10,
+        frame_step_options=(1,),
+        color_steps=(64, 32),
+        transparency_optimization_options=(True,),
+    )
+
+    assert transparency_result.compressed_size <= no_transparency_result.compressed_size
