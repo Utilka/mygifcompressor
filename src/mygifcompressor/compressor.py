@@ -32,12 +32,16 @@ def compress_gif(
     output_path: Path,
     target_size: int = BYTES_IN_MEGABYTE,
     color_steps: tuple[int, ...] = (256, 192, 128, 96, 64, 48, 32, 24, 16),
+    frame_step_options: tuple[int, ...] = (1, 2, 3, 4),
 ) -> CompressionResult:
     """Compress a GIF by reducing palette colors while preserving dimensions.
 
-    The compressor keeps width and height intact and iteratively tries lower color counts
-    until the file size is under the target size, or it reaches the minimum configured
-    number of colors.
+    The compressor keeps width and height intact and iteratively tries combinations of:
+    - lower palette color counts
+    - frame downsampling (while preserving overall animation duration)
+
+    It returns as soon as the target size is achieved, otherwise it keeps the smallest
+    candidate it could produce.
     """
 
     if target_size <= 0:
@@ -60,7 +64,10 @@ def compress_gif(
             raise CompressionError(f"Unsupported image format: {source.format}")
 
         size = source.size
-        durations = [frame.info.get("duration", source.info.get("duration", 100)) for frame in ImageSequence.Iterator(source)]
+        durations = [
+            frame.info.get("duration", source.info.get("duration", 100))
+            for frame in ImageSequence.Iterator(source)
+        ]
         loop = source.info.get("loop", 0)
         disposal = source.info.get("disposal", 2)
 
@@ -69,44 +76,56 @@ def compress_gif(
         if not rgba_frames:
             raise CompressionError(f"GIF has no frames: {input_path}")
 
-        for colors in color_steps:
-            processed_frames = [
-                frame.quantize(colors=colors, method=Image.Quantize.FASTOCTREE)
-                for frame in rgba_frames
-            ]
+        for frame_step in frame_step_options:
+            sampled_frames: list[Image.Image] = []
+            sampled_durations: list[int] = []
 
-            first, *rest = processed_frames
-            first.save(
-                output_path,
-                save_all=True,
-                append_images=rest,
-                optimize=True,
-                loop=loop,
-                duration=durations,
-                disposal=disposal,
-            )
+            for index in range(0, len(rgba_frames), frame_step):
+                sampled_frames.append(rgba_frames[index])
+                end_index = min(index + frame_step, len(durations))
+                sampled_durations.append(sum(durations[index:end_index]))
 
-            with Image.open(output_path) as candidate:
-                if candidate.size != size:
-                    raise CompressionError(
-                        "Compression changed GIF dimensions, which is not allowed."
-                    )
+            if not sampled_frames:
+                continue
 
-            compressed_size = output_path.stat().st_size
-            if compressed_size < best_size:
-                best_size = compressed_size
-                best_colors = colors
+            for colors in color_steps:
+                processed_frames = [
+                    frame.quantize(colors=colors, method=Image.Quantize.FASTOCTREE)
+                    for frame in sampled_frames
+                ]
 
-            if compressed_size <= target_size:
-                return CompressionResult(
-                    input_path=input_path,
-                    output_path=output_path,
-                    original_size=original_size,
-                    compressed_size=compressed_size,
-                    target_size=target_size,
-                    success=True,
-                    colors_used=colors,
+                first, *rest = processed_frames
+                first.save(
+                    output_path,
+                    save_all=True,
+                    append_images=rest,
+                    optimize=True,
+                    loop=loop,
+                    duration=sampled_durations,
+                    disposal=disposal,
                 )
+
+                with Image.open(output_path) as candidate:
+                    if candidate.size != size:
+                        raise CompressionError(
+                            "Compression changed GIF dimensions, which is not allowed."
+                        )
+
+                compressed_size = output_path.stat().st_size
+                if compressed_size < best_size:
+                    best_size = compressed_size
+                    best_colors = colors
+
+                if compressed_size <= target_size:
+                    return CompressionResult(
+                        input_path=input_path,
+                        output_path=output_path,
+                        original_size=original_size,
+                        compressed_size=compressed_size,
+                        target_size=target_size,
+                        success=True,
+                        colors_used=colors,
+                    )
 
     final_size = output_path.stat().st_size if output_path.exists() else original_size
     return CompressionResult(

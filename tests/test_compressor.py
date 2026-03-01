@@ -40,3 +40,18 @@ def test_compress_gif_reports_when_target_unreachable(tmp_path: Path) -> None:
 
     assert result.success is False
     assert output_path.exists()
+
+
+def test_compress_gif_can_reduce_frame_count_for_stronger_compression(tmp_path: Path) -> None:
+    input_path = tmp_path / "animated.gif"
+    output_path = tmp_path / "compressed.gif"
+
+    _create_sample_gif(input_path, frames=18, size=(220, 140))
+
+    result = compress_gif(input_path, output_path, target_size=2_000)
+
+    with Image.open(input_path) as original, Image.open(output_path) as compressed:
+        assert compressed.size == original.size
+        assert compressed.n_frames <= original.n_frames
+
+    assert result.compressed_size <= result.original_size
